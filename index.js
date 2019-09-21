@@ -16,185 +16,181 @@
  */
 
 import * as tf from '@tensorflow/tfjs';
-import * as tfd from '@tensorflow/tfjs-data';
 
-import {ControllerDataset} from './controller_dataset';
-import * as ui from './ui';
+import {IMAGENET_CLASSES} from './imagenet_classes';
 
-// The number of classes we want to predict. In this example, we will be
-// predicting 4 classes for up, down, left, and right.
-const NUM_CLASSES = 4;
+const MOBILENET_MODEL_PATH =
+    // tslint:disable-next-line:max-line-length
+    'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json';
 
-// A webcam iterator that generates Tensors from the images from the webcam.
-let webcam;
+const IMAGE_SIZE = 224;
+const TOPK_PREDICTIONS = 10;
 
-// The dataset object where we will store activations.
-const controllerDataset = new ControllerDataset(NUM_CLASSES);
+let mobilenet;
+const mobilenetDemo = async () => {
+  status('Loading model...');
 
-let truncatedMobileNet;
-let model;
+  mobilenet = await tf.loadLayersModel(MOBILENET_MODEL_PATH);
 
-// Loads mobilenet and returns a model that returns the internal activation
-// we'll use as input to our classifier model.
-async function loadTruncatedMobileNet() {
-  const mobilenet = await tf.loadLayersModel(
-      'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json');
+  // Warmup the model. This isn't necessary, but makes the first prediction
+  // faster. Call `dispose` to release the WebGL memory allocated for the return
+  // value of `predict`.
+  mobilenet.predict(tf.zeros([1, IMAGE_SIZE, IMAGE_SIZE, 3])).dispose();
 
-  // Return a model that outputs an internal activation.
-  const layer = mobilenet.getLayer('conv_pw_13_relu');
-  return tf.model({inputs: mobilenet.inputs, outputs: layer.output});
-}
+  status('');
 
-// When the UI buttons are pressed, read a frame from the webcam and associate
-// it with the class label given by the button. up, down, left, right are
-// labels 0, 1, 2, 3 respectively.
-ui.setExampleHandler(async label => {
-  let img = await getImage();
-
-  controllerDataset.addExample(truncatedMobileNet.predict(img), label);
-
-  // Draw the preview thumbnail.
-  ui.drawThumb(img, label);
-  img.dispose();
-})
-
-/**
- * Sets up and trains the classifier.
- */
-async function train() {
-  if (controllerDataset.xs == null) {
-    throw new Error('Add some examples before training!');
-  }
-
-  // Creates a 2-layer fully connected model. By creating a separate model,
-  // rather than adding layers to the mobilenet model, we "freeze" the weights
-  // of the mobilenet model, and only train weights from the new model.
-  model = tf.sequential({
-    layers: [
-      // Flattens the input to a vector so we can use it in a dense layer. While
-      // technically a layer, this only performs a reshape (and has no training
-      // parameters).
-      tf.layers.flatten(
-          {inputShape: truncatedMobileNet.outputs[0].shape.slice(1)}),
-      // Layer 1.
-      tf.layers.dense({
-        units: ui.getDenseUnits(),
-        activation: 'relu',
-        kernelInitializer: 'varianceScaling',
-        useBias: true
-      }),
-      // Layer 2. The number of units of the last layer should correspond
-      // to the number of classes we want to predict.
-      tf.layers.dense({
-        units: NUM_CLASSES,
-        kernelInitializer: 'varianceScaling',
-        useBias: false,
-        activation: 'softmax'
-      })
-    ]
-  });
-
-  // Creates the optimizers which drives training of the model.
-  const optimizer = tf.train.adam(ui.getLearningRate());
-  // We use categoricalCrossentropy which is the loss function we use for
-  // categorical classification which measures the error between our predicted
-  // probability distribution over classes (probability that an input is of each
-  // class), versus the label (100% probability in the true class)>
-  model.compile({optimizer: optimizer, loss: 'categoricalCrossentropy'});
-
-  // We parameterize batch size as a fraction of the entire dataset because the
-  // number of examples that are collected depends on how many examples the user
-  // collects. This allows us to have a flexible batch size.
-  const batchSize =
-      Math.floor(controllerDataset.xs.shape[0] * ui.getBatchSizeFraction());
-  if (!(batchSize > 0)) {
-    throw new Error(
-        `Batch size is 0 or NaN. Please choose a non-zero fraction.`);
-  }
-
-  // Train the model! Model.fit() will shuffle xs & ys so we don't have to.
-  model.fit(controllerDataset.xs, controllerDataset.ys, {
-    batchSize,
-    epochs: ui.getEpochs(),
-    callbacks: {
-      onBatchEnd: async (batch, logs) => {
-        ui.trainStatus('Loss: ' + logs.loss.toFixed(5));
-      }
+  // Make a prediction through the locally hosted cat.jpg.
+  const catElement = document.getElementById('cat');
+  if (catElement.complete && catElement.naturalHeight !== 0) {
+    predict(catElement);
+    catElement.style.display = '';
+  } else {
+    catElement.onload = () => {
+      predict(catElement);
+      catElement.style.display = '';
     }
-  });
-}
-
-let isPredicting = false;
-
-async function predict() {
-  ui.isPredicting();
-  while (isPredicting) {
-    // Capture the frame from the webcam.
-    const img = await getImage();
-
-    // Make a prediction through mobilenet, getting the internal activation of
-    // the mobilenet model, i.e., "embeddings" of the input images.
-    const embeddings = truncatedMobileNet.predict(img);
-
-    // Make a prediction through our newly-trained model using the embeddings
-    // from mobilenet as input.
-    const predictions = model.predict(embeddings);
-
-    // Returns the index with the maximum probability. This number corresponds
-    // to the class the model thinks is the most probable given the input.
-    const predictedClass = predictions.as1D().argMax();
-    const classId = (await predictedClass.data())[0];
-    img.dispose();
-
-    ui.predictClass(classId);
-    await tf.nextFrame();
   }
-  ui.donePredicting();
+
+  document.getElementById('file-container').style.display = '';
+};
+
+/**
+ * Given an image element, makes a prediction through mobilenet returning the
+ * probabilities of the top K classes.
+ */
+async function predict(imgElement) {
+  status('Predicting...');
+
+  // The first start time includes the time it takes to extract the image
+  // from the HTML and preprocess it, in additon to the predict() call.
+  const startTime1 = performance.now();
+  // The second start time excludes the extraction and preprocessing and
+  // includes only the predict() call.
+  let startTime2;
+  const logits = tf.tidy(() => {
+    // tf.browser.fromPixels() returns a Tensor from an image element.
+    const img = tf.browser.fromPixels(imgElement).toFloat();
+
+    const offset = tf.scalar(127.5);
+    // Normalize the image from [0, 255] to [-1, 1].
+    const normalized = img.sub(offset).div(offset);
+
+    // Reshape to a single-element batch so we can pass it to predict.
+    const batched = normalized.reshape([1, IMAGE_SIZE, IMAGE_SIZE, 3]);
+
+    startTime2 = performance.now();
+    // Make a prediction through mobilenet.
+    return mobilenet.predict(batched);
+  });
+
+  // Convert logits to probabilities and class names.
+  const classes = await getTopKClasses(logits, TOPK_PREDICTIONS);
+  const totalTime1 = performance.now() - startTime1;
+  const totalTime2 = performance.now() - startTime2;
+  status(`Done in ${Math.floor(totalTime1)} ms ` +
+      `(not including preprocessing: ${Math.floor(totalTime2)} ms)`);
+
+  // Show the classes in the DOM.
+  showResults(imgElement, classes);
 }
 
 /**
- * Captures a frame from the webcam and normalizes it between -1 and 1.
- * Returns a batched image (1-element batch) of shape [1, w, h, c].
+ * Computes the probabilities of the topK classes given logits by computing
+ * softmax to get probabilities and then sorting the probabilities.
+ * @param logits Tensor representing the logits from MobileNet.
+ * @param topK The number of top predictions to show.
  */
-async function getImage() {
-  const img = await webcam.capture();
-  const processedImg =
-      tf.tidy(() => img.expandDims(0).toFloat().div(127).sub(1));
-  img.dispose();
-  return processedImg;
-}
+export async function getTopKClasses(logits, topK) {
+  const values = await logits.data();
 
-document.getElementById('train').addEventListener('click', async () => {
-  ui.trainStatus('Training...');
-  await tf.nextFrame();
-  await tf.nextFrame();
-  isPredicting = false;
-  train();
-});
-document.getElementById('predict').addEventListener('click', () => {
-  ui.startPacman();
-  isPredicting = true;
-  predict();
-});
-
-async function init() {
-  try {
-    webcam = await tfd.webcam(document.getElementById('webcam'));
-  } catch (e) {
-    console.log(e);
-    document.getElementById('no-webcam').style.display = 'block';
+  const valuesAndIndices = [];
+  for (let i = 0; i < values.length; i++) {
+    valuesAndIndices.push({value: values[i], index: i});
   }
-  truncatedMobileNet = await loadTruncatedMobileNet();
+  valuesAndIndices.sort((a, b) => {
+    return b.value - a.value;
+  });
+  const topkValues = new Float32Array(topK);
+  const topkIndices = new Int32Array(topK);
+  for (let i = 0; i < topK; i++) {
+    topkValues[i] = valuesAndIndices[i].value;
+    topkIndices[i] = valuesAndIndices[i].index;
+  }
 
-  ui.init();
-
-  // Warm up the model. This uploads weights to the GPU and compiles the WebGL
-  // programs so the first time we collect data from the webcam it will be
-  // quick.
-  const screenShot = await webcam.capture();
-  truncatedMobileNet.predict(screenShot.expandDims(0));
-  screenShot.dispose();
+  const topClassesAndProbs = [];
+  for (let i = 0; i < topkIndices.length; i++) {
+    topClassesAndProbs.push({
+      className: IMAGENET_CLASSES[topkIndices[i]],
+      probability: topkValues[i]
+    })
+  }
+  return topClassesAndProbs;
 }
 
-// Initialize the application.
-init();
+//
+// UI
+//
+
+function showResults(imgElement, classes) {
+  const predictionContainer = document.createElement('div');
+  predictionContainer.className = 'pred-container';
+
+  const imgContainer = document.createElement('div');
+  imgContainer.appendChild(imgElement);
+  predictionContainer.appendChild(imgContainer);
+
+  const probsContainer = document.createElement('div');
+  for (let i = 0; i < classes.length; i++) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const classElement = document.createElement('div');
+    classElement.className = 'cell';
+    classElement.innerText = classes[i].className;
+    row.appendChild(classElement);
+
+    const probsElement = document.createElement('div');
+    probsElement.className = 'cell';
+    probsElement.innerText = classes[i].probability.toFixed(3);
+    row.appendChild(probsElement);
+
+    probsContainer.appendChild(row);
+  }
+  predictionContainer.appendChild(probsContainer);
+
+  predictionsElement.insertBefore(
+      predictionContainer, predictionsElement.firstChild);
+}
+
+const filesElement = document.getElementById('files');
+filesElement.addEventListener('change', evt => {
+  let files = evt.target.files;
+  // Display thumbnails & issue call to predict each image.
+  for (let i = 0, f; f = files[i]; i++) {
+    // Only process image files (skip non image files)
+    if (!f.type.match('image.*')) {
+      continue;
+    }
+    let reader = new FileReader();
+    const idx = i;
+    // Closure to capture the file information.
+    reader.onload = e => {
+      // Fill the image & call predict.
+      let img = document.createElement('img');
+      img.src = e.target.result;
+      img.width = IMAGE_SIZE;
+      img.height = IMAGE_SIZE;
+      img.onload = () => predict(img);
+    };
+
+    // Read in the image file as a data URL.
+    reader.readAsDataURL(f);
+  }
+});
+
+const demoStatusElement = document.getElementById('status');
+const status = msg => demoStatusElement.innerText = msg;
+
+const predictionsElement = document.getElementById('predictions');
+
+mobilenetDemo();

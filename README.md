@@ -1,10 +1,12 @@
-# TensorFlow.js Example: Transfer Learning to play Pacman via the Webcam
+# TensorFlow.js Example: Mobilenet
 
-This example shows you how to predict poses from a webcam using transfer
-learning.
+This example shows you how to load a pretrained mobilenet model.
 
-In this example, we'll use a pretrained [MobileNet](https://github.com/tensorflow/tfjs-examples/tree/master/mobilenet) model and train another model
-using an internal mobilenet activation to predict 4 different classes from the
-webcam defined by the user.
+The mobilenet used in this example was ported from
+[this](https://github.com/fchollet/deep-learning-models/releases/download/v0.6/mobilenet_2_5_224_tf.h5)
+Keras pretrained mobilenet model and hosted online for your convenience.
 
-[See this example live!](https://storage.googleapis.com/tfjs-examples/webcam-transfer-learning/dist/index.html)
+If you want, you can port your own mobilenet model by using the Keras converter script which
+can be found [here](https://github.com/tensorflow/tfjs-converter).
+
+[See this example live!](https://storage.googleapis.com/tfjs-examples/mobilenet/dist/index.html)
